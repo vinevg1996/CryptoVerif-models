@@ -1,0 +1,175 @@
+type uid [fixed].
+type passwd_t [large, fixed, nonuniform].
+
+(* ====================================================== *)
+(* Diffie-Hellman operations                              *)
+(* ====================================================== *)
+
+type Z [bounded, large].
+type G [bounded, large].
+
+expand DH_basic(G, Z, g, exp, exp1, zmult).
+
+
+proba PExpToGroup.
+expand DH_dist_random_group_element_vs_exponent(
+    G, Z, g, exp, exp1, zmult, PExpToGroup).
+
+
+(* ====================================================== *)
+(* Group multiplication                                  *)
+(* ====================================================== *)
+
+fun Encode(passwd_t): Z.
+fun mult(G, G): G.
+fun inv(G): G.
+const neutral: G.
+
+equation builtin commut_group(mult, inv, neutral).
+
+param n.
+equiv(group_mult_uniform)
+  foreach i <= n do
+    r_g <-R G;
+    O(X: G) := return(mult(X, r_g))
+<=(0)=>
+  foreach i <= n do
+    r_g2 <-R G;
+    O(X: G) := return(r_g2).
+
+(* ====================================================== *)
+(* Hash: Random Oracle Model                              *)
+(* ====================================================== *)
+
+type hashed_passwd_t [large, fixed].
+type salt_t [large, fixed].
+type hashkey [fixed].
+
+expand ROM_hash_2(
+    hashkey,
+    salt_t,
+    G,
+    hashed_passwd_t,
+    hash,
+    hashoracle,
+    qH
+).
+
+(* ====================================================== *)
+(* Encryption                                             *)
+(* ====================================================== *)
+
+type cleartext [large, fixed].
+type ciphertext [bounded].
+type keyseed [large, fixed].
+type seckey [large, fixed].
+type pubkey [large, fixed].
+type enc_seed [large, fixed].
+
+proba Penc.
+proba Pencctxt.
+expand IND_CCA2_public_key_enc(
+  keyseed, pubkey, seckey, cleartext, ciphertext,
+  skgen, pkgen, aenc, adec, injbot, Zenc,
+  Penc, Pencctxt
+).
+
+const zero_cleartext: cleartext.
+equation forall x: cleartext;
+  Zenc(x) = zero_cleartext.
+
+
+(* ====================================================== *)
+(* Events                                                 *)
+(* ====================================================== *)
+
+fun pair(uid, passwd_t): cleartext [data].
+
+event user_requests_login(passwd_t).
+event server_user_authenticated(passwd_t).
+event attack_success.
+channel cStart, c1, c2, c3, cGuess, cResult.
+
+
+let user_login(u: uid, pwd: passwd_t, server_pkey: pubkey) =
+  in(c2, ());
+  event user_requests_login(pwd);
+  let ct = aenc(pair(u, pwd), server_pkey) in
+  out(c2, ct).
+
+let server_app(hk: hashkey, u: uid, pwd: passwd_t, salt: salt_t, r: Z, server_skey: seckey) =
+    in(c1, ());
+    let pwd_G = Encode(pwd) in
+    let G_exp_P = exp(g, pwd_G) in
+    let pwd_singularized = mult(G_exp_P, exp(g, r)) in
+    let pwd_save = hash(hk, salt, pwd_singularized) in
+    out(c1, (u, pwd_save, salt));
+
+    in(c3, x: ciphertext);
+    let injbot(pair(u_recv, password_recv)) = adec(x, server_skey) in
+    event server_user_authenticated(password_recv);
+    out(c3, ()).
+
+event pwd_recovered.
+let check_password(pwd: passwd_t) =
+    in(cGuess, x: passwd_t);
+    if x = pwd then
+        event pwd_recovered;
+        out(cResult, ())
+    else
+        out(cResult, ()).
+
+
+event hash_preimage_found.
+channel cGuessHash.
+let check_hash_preimage(hk: hashkey, salt: salt_t, pwd_save: hashed_passwd_t) =
+    in(cGuessHash, x: G);
+
+    if hash(hk, salt, x) = pwd_save then
+        event hash_preimage_found;
+        out(cResult, ())
+    else
+        out(cResult, ()).
+
+(* ====================================================== *)
+(* Security queries                                       *)
+(* ====================================================== *)
+
+query event(pwd_recovered) ==> false.
+query event(hash_preimage_found) ==> false.
+
+(* ====================================================== *)
+(* Main process                                           *)
+(* ====================================================== *)
+
+process
+
+    in(cStart, ());
+
+    new hk: hashkey;
+    new u: uid;
+    new u_pwd: passwd_t;
+    new salt: salt_t;
+    new ks: keyseed;
+    new r: Z;
+    let server_pr_key = skgen(ks) in
+    let server_pub_key = pkgen(ks) in
+    let pwd_G = Encode(u_pwd) in
+    let G_exp_P = exp(g, pwd_G) in
+    let pwd_singularized = mult(G_exp_P, exp(g, r)) in
+    let pwd_save = hash(hk, salt, pwd_singularized) in
+    out(cStart, (u, server_pub_key));
+    (
+        user_login(u, u_pwd, server_pub_key) |
+        server_app(hk, u, u_pwd, salt, r, server_pr_key) |
+        hashoracle(hk) |
+        check_password(u_pwd) |
+        check_hash_preimage(hk, salt, pwd_save)
+    )
+
+(*
+RESULT Proved event(hash_preimage_found) ==> false up to probability 
+    (1 + qH) / |G| + PExpToGroup + (qH + 2) / |hashed_passwd_t|
+RESULT Proved event(pwd_recovered) ==> false up to probability 
+    Pcoll1rand(passwd_t) + Penc(time_1, 1) + (1 + qH) / |G| + PExpToGroup + (qH + 2) / |hashed_passwd_t|
+*)

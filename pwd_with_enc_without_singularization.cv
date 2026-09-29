@@ -1,0 +1,141 @@
+type uid [fixed].
+type passwd_t [large, fixed, nonuniform].
+type hashed_passwd_t [large, fixed].
+type salt_t [large, fixed].
+type hashkey [fixed].
+
+(* ====================================================== *)
+(* Hash: Random Oracle Model                              *)
+(* ====================================================== *)
+
+expand ROM_hash_2(
+    hashkey,
+    salt_t,
+    passwd_t,
+    hashed_passwd_t,
+    hash,
+    hashoracle,
+    qH
+).
+
+(* ====================================================== *)
+(* Encryption                                             *)
+(* ====================================================== *)
+
+type cleartext [large, fixed].
+type ciphertext [bounded].
+type keyseed [large, fixed].
+type seckey [large, fixed].
+type pubkey [large, fixed].
+type enc_seed [large, fixed].
+
+proba Penc.
+proba Pencctxt.
+expand IND_CCA2_public_key_enc(
+  keyseed, pubkey, seckey, cleartext, ciphertext,
+  skgen, pkgen, aenc, adec, injbot, Z,
+  Penc, Pencctxt
+).
+
+const zero_cleartext: cleartext.
+equation forall x: cleartext;
+  Z(x) = zero_cleartext.
+
+
+(* ====================================================== *)
+(* Events                                                 *)
+(* ====================================================== *)
+
+fun pair(uid, passwd_t): cleartext [data].
+
+event user_requests_login(passwd_t).
+event server_user_authenticated(passwd_t).
+event pwd_recovered.
+event second_preimage_found.
+event attack_success.
+channel cStart, c1, c2, c3, cGuess, cResult.
+
+
+(* ====================================================== *)
+(* Database                                               *)
+(* ====================================================== *)
+
+let user_login(u: uid, pwd: passwd_t, server_pkey: pubkey) =
+  in(c2, ());
+  event user_requests_login(pwd);
+  let ct = aenc(pair(u, pwd), server_pkey) in
+  out(c2, ct).
+
+let server_app(hk: hashkey, u: uid, pwd: passwd_t, salt: salt_t, server_skey: seckey) =
+    in(c1, ());
+    let pwd_save = hash(hk, salt, pwd) in
+    out(c1, (u, pwd_save, salt));
+
+    in(c3, x: ciphertext);
+    let injbot(pair(u_recv, password_recv)) = adec(x, server_skey) in
+    event server_user_authenticated(password_recv);
+    out(c3, ()).
+
+
+let check_password(pwd: passwd_t) =
+    in(cGuess, x: passwd_t);
+    if x = pwd then
+        event pwd_recovered;
+        out(cResult, ())
+    else
+        out(cResult, ()).
+
+channel cGuessHash.
+let check_hash_preimage(
+    hk: hashkey,
+    salt: salt_t,
+    pwd_save: hashed_passwd_t
+) =
+    in(cGuessHash, x: passwd_t);
+
+    if hash(hk, salt, x) = pwd_save then
+        event second_preimage_found;
+        out(cResult, ())
+    else
+        out(cResult, ()).
+
+
+(* ====================================================== *)
+(* Security queries                                       *)
+(* ====================================================== *)
+
+query event(pwd_recovered) ==> false.
+query event(second_preimage_found) ==> false.
+
+(* ====================================================== *)
+(* Main process                                           *)
+(* ====================================================== *)
+
+process
+
+    in(cStart, ());
+
+    new hk: hashkey;
+    new u: uid;
+    new u_pwd: passwd_t;
+    new salt: salt_t;
+    new ks: keyseed;
+    let server_pr_key = skgen(ks) in
+    let server_pub_key = pkgen(ks) in
+    let pwd_save = hash(hk, salt, u_pwd) in
+    out(cStart, (u, server_pub_key));
+
+    (
+        user_login(u, u_pwd, server_pub_key) |
+        server_app(hk, u, u_pwd, salt, server_pr_key) |
+        hashoracle(hk) |
+        check_password(u_pwd) |
+        check_hash_preimage(hk, salt, pwd_save)
+    )
+
+(*
+RESULT Proved event(second_preimage_found) ==> false up to probability 
+    (2 + qH) * Pcoll1rand(passwd_t) + Penc(time_1, 1) + (qH + 2) / |hashed_passwd_t|
+RESULT Proved event(pwd_recovered) ==> false up to 
+    probability (2 + qH) * Pcoll1rand(passwd_t) + Penc(time_1, 1) + (qH + 2) / |hashed_passwd_t|
+*)
